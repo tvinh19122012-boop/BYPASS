@@ -1,11 +1,12 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import re, time, json
+import re
+import time
 from datetime import datetime
 import requests
 
 app = Flask(__name__)
-CORS(app)  # Giúp trang HTML của bạn gọi được API này mà không bị chặn
+CORS(app)
 
 BASE = "https://keycheater.site"
 API = f"{BASE}/getkey"
@@ -13,66 +14,69 @@ UA = "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) 
 
 @app.route('/run-tool', methods=['POST'])
 def run_tool():
-    # Nhận dữ liệu từ trang HTML gửi lên
-    req_data = request.json
-    seller = req_data.get('seller', 'zennymod1')
-    game = req_data.get('game', 'noroot')
-
-    cfg = {"seller": seller, "game": game}
-    
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": UA,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
-    })
-
     try:
+        data = request.json or {}
+        seller = data.get('seller', 'zennymod1')
+        game = data.get('game', 'noroot')
+
+        s = requests.Session()
+        s.headers.update({
+            "User-Agent": UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
+        })
+
         # ---- STEP 1: GET CSRF ----
-        r = s.get(f"{API}/{cfg['seller']}")
+        r = s.get(f"{API}/{seller}", timeout=15)
         r.raise_for_status()
         html = r.text
 
         csrf_m = re.search(r'csrf_test_name" value="([^"]+)"', html)
-        if not csrf_m: 
-            return jsonify({"status": "error", "message": "FAIL: No CSRF"})
+        if not csrf_m:
+            return jsonify({"status": "error", "message": "Không tìm thấy mã CSRF token."}), 400
         csrf = csrf_m.group(1)
 
-        # Config from debug toolbar
-        wait = 100
+        wait = 10
         wm = re.search(r'wait_time["\:]\s*(\d+)', html)
-        if wm: wait = int(wm.group(1))
+        if wm:
+            wait = int(wm.group(1))
 
         # ---- STEP 2: SUBMIT ----
         r2 = s.post(f"{BASE}/getkey-process",
-                    data={"csrf_test_name": csrf, "seller": cfg["seller"], "game": cfg["game"]},
-                    allow_redirects=False)
+                    data={"csrf_test_name": csrf, "seller": seller, "game": game},
+                    allow_redirects=False, timeout=15)
+        
         if r2.status_code not in (302, 303):
-            return jsonify({"status": "error", "message": f"FAIL: HTTP {r2.status_code}"})
+            return jsonify({"status": "error", "message": f"Gửi request thất bại (HTTP {r2.status_code})"}), 400
 
         token = None
         for k, v in r2.headers.items():
             if k.lower() == "set-cookie":
                 mt = re.search(r'getkey_token=([^;]+)', v)
-                if mt: token = mt.group(1)
-        if not token: 
-            return jsonify({"status": "error", "message": "FAIL: No token"})
+                if mt:
+                    token = mt.group(1)
+        
+        if not token:
+            return jsonify({"status": "error", "message": "Không lấy được getkey_token."}), 400
 
         s.cookies.set("getkey_token", token, domain="keycheater.site", path="/")
-        s.cookies.set("getkey_game", cfg["game"], domain="keycheater.site", path="/")
+        s.cookies.set("getkey_game", game, domain="keycheater.site", path="/")
 
         # ---- STEP 3: WAIT COUNTER ----
+        # Tạm dừng thời gian theo yêu cầu của server target
         time.sleep(wait)
 
         # ---- STEP 4: CALLBACK ----
-        r3 = s.get(f"{BASE}/getkey-callback/{cfg['seller']}")
+        r3 = s.get(f"{BASE}/getkey-callback/{seller}", timeout=15)
         text = r3.text
 
         if "PHAT HIEN" in text.upper() or "GIAN LAN" in text.upper():
-            return jsonify({"status": "error", "message": "BLOCKED! Server detected bypass."})
+            return jsonify({"status": "error", "message": "Server phát hiện thời gian bất thường hoặc lỗi bypass."}), 400
 
         # ---- EXTRACT KEY ----
         key = None
+        
+        # Thử tìm kiếm các dạng key khác nhau
         m = re.search(r'class="[^"]*key[-_]?box[^"]*"[^>]*>([^<]+)<', text, re.I)
         if m: key = m.group(1).strip()
 
@@ -95,24 +99,17 @@ def run_tool():
                     key = m.group(1)
                     break
 
-        if not key:
-            try:
-                data = json.loads(text)
-                if isinstance(data, dict):
-                    for k in ("key", "key_code", "user_key", "data", "code", "token"):
-                        if k in data:
-                            key = data[k]
-                            break
-            except:
-                pass
-
         if key:
-            return jsonify({"status": "success", "key": key})
+            return jsonify({
+                "status": "success",
+                "key": key,
+                "message": f"Kích hoạt thành công cho seller: {seller}"
+            })
         else:
-            return jsonify({"status": "error", "message": "FAILED: No key found"})
+            return jsonify({"status": "error", "message": "Không trích xuất được Key từ phản hồi server."}), 500
 
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
